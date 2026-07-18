@@ -1,0 +1,1289 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Circuit Sprite: Neo Nexus</title>
+<style>
+  html,body{margin:0;padding:0;background:#0d0b1a;height:100%;overflow:hidden;touch-action:none;
+    font-family:monospace;-webkit-user-select:none;user-select:none;}
+  #wrap{display:flex;align-items:center;justify-content:center;height:100%;}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#0d0b1a;}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+"use strict";
+/* =====================================================================
+   CIRCUIT SPRITE: NEO NEXUS — Flappy-Roguelite (v6.1: Figur detailgetreu nach Referenz)
+   Architektur:
+     PERMANENT-LOGIK: Storage, SKILL_TREE, Meta          (persistiert)
+     RUN-LOGIK:       ROOM_TYPES, RoomDirector, Run      (pro Run neu)
+   ===================================================================== */
+
+// ---------- Interne Auflösung (Pixel-Art), skaliert aufs Display ----------
+const W = 320, H = 480;
+const cvs = document.getElementById("game");
+const ctx = cvs.getContext("2d");
+const SCALE = 4;                 // 4x Supersampling: HD-Pixel-Art mit Tiefe
+cvs.width = W*SCALE; cvs.height = H*SCALE;
+ctx.scale(SCALE, SCALE);
+function fit(){
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  cvs.style.width  = Math.floor(W * s) + "px";
+  cvs.style.height = Math.floor(H * s) + "px";
+}
+addEventListener("resize", fit); fit();
+ctx.imageSmoothingEnabled = false;
+
+// ---------- Palette (16-Bit-Look, nach Referenz-Artwork) ----------
+const PAL = {
+  black:"#100e1c", white:"#f5f0ff",
+  // Dungeon (Stein-Blau, Panel 1)
+  dgBg:"#22304a", dgBg2:"#182236", dgBrick:"#3d4f6b", dgBrickD:"#2b3a52", dgLine:"#141e30",
+  stone:"#4a5a78", stoneLite:"#6e7e9e", stoneDark:"#2b3a52", moss:"#6a8a4a", chain:"#9aa8c0",
+  // Wald (Panel 2)
+  sky:"#7ec8e8", sky2:"#a8dcf2", cloud:"#f8fcff", leaf:"#2a6a3a", leafL:"#3da35d", leafD:"#1d4a28",
+  trunk:"#6b4a2a", grass:"#4ab54a", grassD:"#2a7a33",
+  // Lava (Panel 3)
+  lvSky:"#2a0c14", lvSky2:"#4a1018", lvSky3:"#6a1a16", lvRock:"#241016", lvRockL:"#452228",
+  lava:"#ff5a20", lavaL:"#ffa03a",
+  // Charakter & Objekte
+  capG:"#3da35d", capD:"#2a7a43", hair:"#ffd24a", skin:"#ffd8a8",
+  gold:"#ffd24a", goldD:"#c99a1e", ruby:"#ff4a6a", rubyD:"#b81f3d",
+  green:"#4ad24a", greenD:"#2a9a2a", red:"#e83a3a", blue:"#4a8aff", purple:"#9a5aff",
+  spike:"#c9c2e8", metal:"#b8c0d0", wood:"#d8a05a", woodD:"#8a5a2c", torch:"#ff9a3a",
+  teal:"#3ecfd4", tealD:"#1f8a94", tealL:"#8ef0f4", copper:"#c47a3a", copperD:"#8a4f22",
+  amber:"#ffb52a", wingB:"#2a6aff", wingC:"#6ae8ff",
+  // UI (Nexus/Menüs)
+  bgDark:"#0d0b1a", bgMid:"#1a1633", bgLite:"#2a2450", ghost:"#b8a8ff"
+};
+
+// Farb-Helfer: hex aufhellen (f>0) oder abdunkeln (f<0)
+function shade(hex, f){
+  const n = parseInt(hex.slice(1), 16);
+  let r = (n>>16)&255, g = (n>>8)&255, b = n&255;
+  if (f >= 0){ r += (255-r)*f; g += (255-g)*f; b += (255-b)*f; }
+  else { r *= 1+f; g *= 1+f; b *= 1+f; }
+  return "rgb(" + (r|0) + "," + (g|0) + "," + (b|0) + ")";
+}
+
+// ---------- Sprite-Fabrik: Pixel-Maps -> Offscreen-Canvas ----------
+const SPRITES = (() => {
+  function mk(map, pal){
+    // 2x-Rendering mit Auto-Shading: Rim-Light oben/links, Kernschatten
+    // unten/rechts -> plastischer Pseudo-3D-Look bei doppelter Auflösung
+    const mw = map[0].length, mh = map.length;
+    const c = document.createElement("canvas");
+    c.width = mw*2; c.height = mh*2;
+    const g = c.getContext("2d");
+    const at = (x,y) => (x<0||y<0||x>=mw||y>=mh) ? "." : (map[y][x] || ".");
+    for (let y=0; y<mh; y++) for (let x=0; x<mw; x++){
+      const ch = at(x,y); if (ch === ".") continue;
+      const col = pal[ch];
+      g.fillStyle = col; g.fillRect(x*2, y*2, 2, 2);
+      if (at(x,y-1) === "."){ g.fillStyle = shade(col, 0.4); g.fillRect(x*2, y*2, 2, 1); }
+      else if (at(x,y-2) === "."){ g.fillStyle = shade(col, 0.15); g.fillRect(x*2, y*2, 2, 1); }
+      if (at(x-1,y) === "."){ g.fillStyle = shade(col, 0.2); g.fillRect(x*2, y*2, 1, 2); }
+      if (at(x,y+1) === "."){ g.fillStyle = shade(col, -0.4); g.fillRect(x*2, y*2+1, 2, 1); }
+      else if (at(x,y+2) === "."){ g.fillStyle = shade(col, -0.15); g.fillRect(x*2, y*2+1, 2, 1); }
+      if (at(x+1,y) === "."){ g.fillStyle = shade(col, -0.2); g.fillRect(x*2+1, y*2, 1, 2); }
+    }
+    return c;
+  }
+  const cp = {G:PAL.capG, E:PAL.capD, H:PAL.hair, S:PAL.skin, K:PAL.black, W:PAL.white,
+              B:PAL.blue, Y:PAL.gold, T:PAL.woodD, X:PAL.spike, M:PAL.metal,
+              A:"#2a6a2a", L:"#4a9a3a", D:"#1d4a20", R:PAL.ruby, r:PAL.rubyD,
+              t:PAL.woodD, F:PAL.wood, b:"#a8d8f0",
+              Q:PAL.teal, q:PAL.tealD, Z:PAL.tealL, C:PAL.copper, c:PAL.copperD,
+              V:PAL.amber, v:"#c9821a", U:PAL.wingB, u:PAL.wingC};
+  // Circuit Sprite (CSNN-F5), 32px-HD: Kupfer-Antennen mit Spulen,
+  // Bernstein-Visier mit Glanz, Stern-Emblem, Energie-Klinge, Kupferfaust
+  const hero = mk([
+    ".....C....................C.....",
+    "....cC....................Cc....",
+    "....C......................C....",
+    "....cC....................Cc....",
+    ".....C....................C.....",
+    "......C..................C......",
+    ".......C................C.......",
+    "........CC..........CC..........",
+    "..........QQQQQQQQQQ............",
+    ".........QQQQQQQQQQQQ...........",
+    "........QQQQQQQQQQQQQQ..........",
+    "........QQVVVVVVVVVVQQ..........",
+    "........QQVWWVVVVVVVQQ..........",
+    "........QQVVVVVVVVVVQQ..........",
+    "........QQvvvvvvvvvvQQ..........",
+    ".........QQQQQQQQQQQQ...........",
+    "..Z.......QQQQQQQQQQ............",
+    "..Z........QQQQQQQQ.............",
+    "..Z....u..QQQYYQQQQQ............",
+    "..Z....u.QQQYYYYQQQQQ...........",
+    "..Z....u.QQQQYYQQQQQQCCC........",
+    "..Zc...u.QQQQYYQQQQQCCCCC.......",
+    "..cC...u.QQQQQQQQQQQCCZCC.......",
+    "...C...u.QQQQQQQQQQQ.CCCC.......",
+    "..........cccccccc.....C........",
+    ".........qqqqqqqqqq.............",
+    "..........QQQ..QQQ..............",
+    "..........QQq..QQq..............",
+    ".........CCCC..CCCC.............",
+    ".........cccC..cccC............."
+  ], cp);
+  // Nano-Drohne (Gegner): Kupfer-Panzer, rotes Sensor-Auge
+  const deku = mk([
+    ".c...CC...c.",
+    "..CCCCCCCC..",
+    ".CCQQQQQQCC.",
+    "cCQQQQQQQQCc",
+    ".CQWRRWQQQC.",
+    ".CQWRRWQQQC.",
+    "cCQQQQQQQQCc",
+    ".CCQqqqqQCC.",
+    "..CCCCCCCC..",
+    ".c..CCCC..c.",
+    "....c..c...."
+  ], cp);
+  const ruby = mk([          // Volt-Zelle (Energie-Währung)
+    "...YY..",
+    "..YYV..",
+    ".YYYYV.",
+    "..VYY..",
+    ".VYY...",
+    ".YY....",
+    "Y......"
+  ], cp);
+  const heart = mk([         // Energie-Kern (Lebensanzeige)
+    "..uZZu..",
+    ".ZZWWZZ.",
+    "uZWWWWZu",
+    ".ZZWWZZ.",
+    "..uZZu..",
+    "...uu..."
+  ], cp);
+  // Plasma-Klinge (rotierend, kehrt zurück)
+  const boom = mk([
+    "uZ......",
+    "uZZ.....",
+    ".uZZ....",
+    "..uZZ...",
+    "...uZZ..",
+    "....uZZZ",
+    ".....uZZ",
+    "......uu"
+  ], cp);
+  // Item-Icons (9x9, für HUD-Box & Auswahl)
+  const icoHook = mk([       // Magnet-Anker
+    ".CC...CC.",
+    ".CC...CC.",
+    ".CC...CC.",
+    ".CCC.CCC.",
+    "..CCCCC..",
+    "...CCC...",
+    ".........",
+    ".ZZ...ZZ.",
+    "........."
+  ], cp);
+  const icoFeather = mk([    // Anti-Grav-Modul
+    "....Z....",
+    "...ZZZ...",
+    "..ZZZZZ..",
+    "....Z....",
+    "..CCCCC..",
+    "..CQQQC..",
+    "..CCCCC..",
+    "...V.V...",
+    "..V.V.V.."
+  ], cp);
+  const icoSword = mk([      // Energie-Klinge
+    "....Z....",
+    "....Z....",
+    "...uZ....",
+    "....Z....",
+    "...uZ....",
+    "..CCCCC..",
+    "....C....",
+    "....C....",
+    "........."
+  ], cp);
+  return {hero, deku, ruby, heart, boom, icoHook, icoFeather, icoSword, icoBoom:boom};
+})();
+
+/* =====================================================================
+   HD-HELD (Pixar-Look): einmalig vektorbasiert vorgerendert.
+   Nur die Figur ist weich schattiert — die Welt bleibt 16-Bit-Pixel-Art.
+   ===================================================================== */
+function makeHeroHD(tilt){
+  // Detailgetreuer Nachbau der Figur-Referenz (Chibi-Proportionen, glossy)
+  const c = document.createElement("canvas");
+  c.width = 320; c.height = 300;
+  const g = c.getContext("2d");
+  const TAU = Math.PI*2;
+  function lg(x0,y0,x1,y1,st){ const r=g.createLinearGradient(x0,y0,x1,y1); st.forEach(s=>r.addColorStop(s[0],s[1])); return r; }
+  function rgr(x,y,rad,st){ const r=g.createRadialGradient(x,y,rad*0.12,x,y,rad); st.forEach(s=>r.addColorStop(s[0],s[1])); return r; }
+  function ell(x,y,rx,ry,fill,rot){
+    g.save(); g.translate(x,y); if(rot) g.rotate(rot); g.scale(rx,ry);
+    g.beginPath(); g.arc(0,0,1,0,TAU); g.restore(); g.fillStyle=fill; g.fill();
+  }
+  function poly(pts,fill){ g.beginPath(); g.moveTo(pts[0][0],pts[0][1]);
+    for(let i=1;i<pts.length;i++) g.lineTo(pts[i][0],pts[i][1]); g.fillStyle=fill; g.fill(); }
+  function dots(x0,y0,qx,qy,x1,y1,r,col,n){
+    for(let i=0;i<=n;i++){ const t=i/n, m=1-t;
+      ell(m*m*x0+2*m*t*qx+t*t*x1, m*m*y0+2*m*t*qy+t*t*y1, r, r, col); }
+  }
+  const teal   = lg(0,140,0,290,[[0,"#7fe8ec"],[0.45,"#3ecfd4"],[1,"#1a7c86"]]);
+  const copper = lg(0,140,0,300,[[0,"#e8b078"],[0.4,"#c47a3a"],[1,"#7a4218"]]);
+  const CIRC = "#ffb020";                                       // Schaltkreis-Glow
+  // ---- 4 Energie-Schwingen (2 pro Seite) mit Kupfer-Streben ----
+  function blade(len, wd){
+    poly([[6,-wd*0.5],[len*0.55,-wd*0.62],[len,-wd*0.1],[len*0.92,wd*0.28],[len*0.5,wd*0.45],[6,wd*0.5]],
+         lg(6,0,len,0,[[0,"#1a3a7a"],[0.5,"#0e2456"],[1,"#0a1a3e"]]));
+    poly([[6,-wd*0.5],[len*0.55,-wd*0.62],[len,-wd*0.1],[len*0.97,-wd*0.02],[len*0.55,-wd*0.5],[6,-wd*0.38]], "#3ee0e8");
+    poly([[14,3],[len*0.45,-3],[len*0.5,3],[len*0.82,-1],[len*0.82,3],[len*0.5,7],[len*0.45,1],[14,7]], CIRC);
+    ell(8,0,11,7,copper);
+  }
+  for (const s of [-1,1]){
+    g.save(); g.translate(160,148); g.scale(s,1); g.rotate(-0.72 - tilt*0.45);
+    blade(138, 38); g.restore();
+    g.save(); g.translate(160,160); g.scale(s,1); g.rotate(-0.12 + tilt*0.35);
+    blade(86, 22); g.restore();
+  }
+  // ---- Beine: breiter Stand, Schenkel-Schaltkreise, Kupfer-Knie, Stiefel ----
+  for (const s of [-1,1]){
+    const X = x => 160 + s*x;
+    poly([[X(18),222],[X(4),224],[X(26),252],[X(44),248]].map(p=>p), teal);
+    poly([[X(30),250],[X(14),254],[X(20),282],[X(36),278]], teal);
+    poly([[X(14),228],[X(19),228],[X(34),250],[X(29),252]], CIRC);          // Bein-Glow
+    ell(X(30),252,13,10,copper);                                            // Knie
+    ell(X(28),286,21,11,lg(0,276,0,296,[[0,"#3ecfd4"],[1,"#14606a"]]));     // Stiefel
+    ell(X(40),288,10,8,copper);                                             // Zehenkappe
+    ell(X(28),294,23,6,"#7a4218");                                          // Sohle
+  }
+  // ---- Torso ----
+  ell(160,152,13,9,"#7a4218");                                              // Hals
+  poly([[128,158],[192,158],[186,216],[134,216]], teal);
+  ell(160,168,35,17,"#35b8c0");                                             // Brustpanzer
+  poly([[128,158],[150,162],[142,178],[124,172]], copper);                  // Kragen li
+  poly([[192,158],[170,162],[178,178],[196,172]], copper);                  // Kragen re
+  poly([[157,166],[163,166],[162,216],[158,216]], CIRC);                    // Mittel-Linie
+  poly([[138,172],[158,188],[158,193],[134,177]], CIRC);                    // Brust-V li
+  poly([[182,172],[162,188],[162,193],[186,177]], CIRC);                    // Brust-V re
+  ell(160,184,13,13,"#2a9aa4");                                             // Emblem-Ring
+  let st=[]; for(let i=0;i<8;i++){ const a=-Math.PI/2+i*TAU/8, r=(i%2===0)?12:4.5;
+    st.push([160+Math.cos(a)*r, 184+Math.sin(a)*r]); }
+  poly(st, "#ffd24a");
+  st=[]; for(let i=0;i<8;i++){ const a=-Math.PI/2+i*TAU/8, r=(i%2===0)?8:3;
+    st.push([160+Math.cos(a)*r, 184+Math.sin(a)*r]); }
+  poly(st, copper);
+  poly([[136,216],[184,216],[180,226],[140,226]], "#7a4218");               // Gürtel
+  ell(160,221,6,4,"#ffd24a");
+  ell(124,168,16,13,copper); ell(120,164,6,4,"rgba(255,255,255,0.5)");      // Schulter li
+  ell(196,168,16,13,copper); ell(192,164,6,4,"rgba(255,255,255,0.5)");      // Schulter re
+  // ---- Linker Arm + gestufte Energie-Klinge ----
+  poly([[124,174],[138,180],[112,208],[100,198]], teal);
+  ell(106,200,10,8,copper);                                                 // Armband
+  g.save(); g.translate(88,204); g.rotate(-0.5);
+  g.fillStyle = "#2a9a2a"; g.fillRect(-5, 6, 10, 26);                       // Griff
+  for (let i=0;i<4;i++){ g.fillStyle="#187a1c"; g.fillRect(-5, 9+i*6, 10, 2); }
+  poly([[-19,-9],[19,-9],[15,1],[-15,1]], copper);                          // Parier
+  const segs = [[-9,0],[5,-1],[-7,1],[6,0]];                                // Versatz-Stufen
+  for (let i=0;i<4;i++){
+    const ox = segs[i][0], y0 = -12 - i*30;
+    g.fillStyle = "rgba(62,224,232,0.88)";
+    g.fillRect(-12+ox, y0-27, 26, 27);
+    g.fillStyle = "rgba(216,251,255,0.95)";
+    g.fillRect(-12+ox, y0-27, 6, 27);                                       // Lichtkante
+    g.fillStyle = "rgba(24,168,200,0.9)";
+    g.fillRect(9+ox, y0-27, 5, 27);
+  }
+  poly([[-8,-138],[10,-138],[1,-162]], "rgba(216,251,255,0.95)");           // Spitze
+  g.restore();
+  ell(84,208,9,8,teal);                                                     // Hand
+  // ---- Rechter Arm + Trommel-Kanone (6 Glüh-Zellen, Spulen, Kern) ----
+  poly([[196,174],[212,180],[228,198],[210,208]], teal);
+  for (let i=0;i<3;i++) ell(226-i*7,202,7,20,i%2?"#7a4218":"#c47a3a");      // Spulen-Ringe
+  ell(256,208,40,34,copper);                                                // Trommel
+  ell(248,196,14,9,"rgba(255,255,255,0.35)",-0.5);                          // Glanz
+  for (let i=0;i<6;i++){
+    const a = i*TAU/6 - 0.3;
+    const zx = 256+Math.cos(a)*25, zy = 208+Math.sin(a)*21;
+    ell(zx,zy,7.5,10,"#7a4218",a+1.57);                                     // Zell-Hülse
+    ell(zx,zy,5.5,8,rgr(zx,zy,9,[[0,"#eaffff"],[0.5,"#6ae8ff"],[1,"#1a7c86"]]),a+1.57);
+  }
+  ell(256,208,13,13,"#7a4218");                                             // Kern-Ring
+  ell(256,208,8,8,rgr(256,208,9,[[0,"#ffffff"],[0.5,"#8ef0f4"],[1,"#18a8c8"]]));
+  // ---- Kopf: Helm, Kupfer-Kamm, Facetten-Visier, Ohr-Discs ----
+  ell(160,106,54,50,lg(0,58,0,156,[[0,"#9df2f5"],[0.4,"#3ecfd4"],[1,"#1f8a94"]]));
+  ell(160,62,24,13,copper); ell(160,55,14,8,copper);                        // Kamm
+  poly([[155,58],[165,58],[163,82],[157,82]], copper);                      // Stirn-Steg
+  ell(108,112,11,14,"#7a4218"); ell(108,112,7,10,copper);                   // Ohr-Disc li
+  ell(212,112,11,14,"#7a4218"); ell(212,112,7,10,copper);                   // Ohr-Disc re
+  ell(163,114,43,37,"#7a4218");                                             // Visier-Rahmen
+  ell(163,114,39,33,rgr(150,100,44,[[0,"#ffe08a"],[0.35,"#ffb52a"],[1,"#9a5208"]]));
+  poly([[136,102],[163,92],[163,114],[132,118]], "rgba(255,255,255,0.16)"); // Facetten
+  poly([[163,92],[192,104],[188,122],[163,114]], "rgba(255,230,150,0.2)");
+  poly([[136,120],[163,116],[178,138],[144,136]], "rgba(120,60,10,0.28)");
+  ell(146,98,13,8,"rgba(255,255,255,0.9)",-0.45);                           // Spekular
+  ell(178,132,10,5,"rgba(120,60,10,0.45)",-0.4);
+  // ---- Antennen: Kupfer-Haken mit Spulen ----
+  for (const s of [-1,1]){
+    const X = x => 160 + s*x;
+    dots(X(22),62, X(48),-14, X(66),26, 4.2, "#c47a3a", 26);                // Haken
+    dots(X(64),24, X(70),34, X(58),40, 3.2, "#c47a3a", 8);                  // Haken-Spitze
+    for (let i=0;i<5;i++) ell(X(38), 30-i*5, 8, 3, i%2?"#7a4218":"#c47a3a", s*0.25); // Spule
+  }
+  return c;
+}
+const HERO = [makeHeroHD(-0.22), makeHeroHD(0.18)];   // 2 Flügel-Frames
+
+// ---------- Biome (zyklisch über die Run-Distanz, wie die 3 Panels) ----------
+const BIOME_CYCLE = ["dungeon", "forest", "lava"];
+function biomeAt(x){ return BIOME_CYCLE[Math.floor(Math.max(0,x)/2200) % 3]; }
+
+/* =====================================================================
+   PERMANENT-LOGIK  (Metaprogression — überlebt jeden Run)
+   ===================================================================== */
+const Storage = (() => {           // localStorage mit In-Memory-Fallback
+  let mem = {};
+  let ok = false;
+  try { localStorage.setItem("__t","1"); localStorage.removeItem("__t"); ok = true; } catch(e){}
+  return {
+    load(){ try { if(ok){ const s = localStorage.getItem("circuitsprite_meta"); if(s) return JSON.parse(s); } } catch(e){} return mem.meta || null; },
+    save(d){ mem.meta = d; try { if(ok) localStorage.setItem("circuitsprite_meta", JSON.stringify(d)); } catch(e){} }
+  };
+})();
+
+// ---------- Skillbaum-Definition (datengetrieben) ----------
+// branch: mut | weisheit | kraft   req: Node-ID im selben Ast (muss max sein)
+const SKILL_TREE = [
+  // System: Panzerung (Überleben)
+  {id:"mut_herz",   branch:"mut", name:"Hüllen-Panzer", max:3, cost:[40,90,180],
+   desc:l=>"+1 Energie-Kern (Hülle)"},
+  {id:"mut_schild", branch:"mut", name:"Schild-Generator", max:1, cost:[120], req:"mut_herz",
+   desc:l=>"Blockt 1 Treffer pro Run"},
+  {id:"mut_fee",    branch:"mut", name:"Backup-Kern",  max:1, cost:[300], req:"mut_schild",
+   desc:l=>"1x Neustart pro Run"},
+  // System: Energie (Ökonomie)
+  {id:"weis_magnet", branch:"weisheit", name:"Volt-Magnet", max:3, cost:[30,70,140],
+   desc:l=>"Zieht Volt an (Radius "+(24+l*16)+")"},
+  {id:"weis_wert",   branch:"weisheit", name:"Überspannung", max:2, cost:[80,160], req:"weis_magnet",
+   desc:l=>"+"+(l*25)+"% Volt-Wert"},
+  {id:"weis_glueck", branch:"weisheit", name:"Daten-Scanner", max:2, cost:[100,200], req:"weis_wert",
+   desc:l=>"+"+(l*8)+"% Chance auf Volt-Depots"},
+  // System: Antrieb (Mobilität)
+  {id:"kraft_flug", branch:"kraft", name:"Gyro-Stabilisator", max:3, cost:[40,90,180],
+   desc:l=>"-"+(l*8)+"% Schwerkraft"},
+  {id:"kraft_feder", branch:"kraft", name:"Schub-Verstärker", max:2, cost:[80,160], req:"kraft_flug",
+   desc:l=>"+"+(l*10)+"% Flap-Schub"},
+  {id:"kraft_dash", branch:"kraft", name:"Air-Dash", max:1, cost:[250], req:"kraft_feder",
+   desc:l=>"Doppel-Tipp: Dash nach vorn"}
+];
+const BRANCH_META = {
+  mut:      {name:"Panzerung", short:"PANZER",  col:PAL.red,    icon:"▲"},
+  weisheit: {name:"Energie",   short:"ENERGIE", col:PAL.amber,  icon:"◆"},
+  kraft:    {name:"Antrieb",   short:"ANTRIEB", col:PAL.teal,   icon:"●"}
+};
+
+// ---------- Meta-Zustand ----------
+const Meta = {
+  rubies: 0, skills: {}, bestDist: 0, runs: 0,
+  load(){ const d = Storage.load(); if(d){ Object.assign(this, d); } },
+  save(){ Storage.save({rubies:this.rubies, skills:this.skills, bestDist:this.bestDist, runs:this.runs}); },
+  lvl(id){ return this.skills[id] || 0; },
+  node(id){ return SKILL_TREE.find(n => n.id === id); },
+  canBuy(n){
+    const l = this.lvl(n.id);
+    if (l >= n.max) return false;
+    if (n.req && this.lvl(n.req) < this.node(n.req).max) return false;
+    return this.rubies >= n.cost[l];
+  },
+  buy(n){
+    if (!this.canBuy(n)) return false;
+    this.rubies -= n.cost[this.lvl(n.id)];
+    this.skills[n.id] = this.lvl(n.id) + 1;
+    this.save(); return true;
+  },
+  // Aggregierte Perks — einzige Schnittstelle zur Run-Logik
+  perks(){
+    return {
+      maxHP:       1 + this.lvl("mut_herz"),
+      shield:      this.lvl("mut_schild") > 0,
+      fairy:       this.lvl("mut_fee") > 0,
+      magnetR:     this.lvl("weis_magnet") > 0 ? 24 + this.lvl("weis_magnet")*16 : 0,
+      rubyMult:    1 + this.lvl("weis_wert")*0.25,
+      grottoBonus: this.lvl("weis_glueck")*0.08,
+      gravMult:    1 - this.lvl("kraft_flug")*0.08,
+      flapMult:    1 + this.lvl("kraft_feder")*0.10,
+      dash:        this.lvl("kraft_dash") > 0
+    };
+  }
+};
+Meta.load();
+
+// ---------- Items (Wahl vor dem Run — verändern das Gameplay) ----------
+const ITEMS = [
+  {id:"none",  name:"Standard-Kern",   col:PAL.white,  icon:"icoSword",
+   desc:["Kein Modul.","Der pure Skill."]},
+  {id:"roc",   name:"Anti-Grav-Modul", col:PAL.purple, icon:"icoFeather",
+   desc:["Höherer Schub,","sanfteres Sinken."]},
+  {id:"boom",  name:"Plasma-Klinge",   col:PAL.tealL,  icon:"icoBoom",
+   desc:["Fliegt automatisch,","zerstört Blöcke & Drohnen."]},
+  {id:"hook",  name:"Magnet-Anker",    col:PAL.blue,   icon:"icoHook",
+   desc:["Halten = in der Luft","verankern (Energie)."]}
+];
+
+/* =====================================================================
+   RUN-LOGIK  (Raum-System — pro Run prozedural neu erzeugt)
+   ===================================================================== */
+const FLOOR = H - 40;            // Bodenhöhe
+const CEIL  = 24;                // Deckenhöhe
+const rnd  = (a,b) => a + Math.random()*(b-a);
+const rndi = (a,b) => Math.floor(rnd(a, b+1));
+const pick = arr => arr[rndi(0, arr.length-1)];
+
+// Jeder Raumtyp: name, weight, minDiff, build(x0, len, diff) -> Entities.
+// diff = 0..1 Skalierung über die Run-Distanz.
+const ROOM_TYPES = {
+  tore: {   // Firewall-Tore (klassische Flappy-Säulen)
+    name:"Firewall-Tore", weight:3, minDiff:0, col:PAL.stone,
+    build(x0, len, diff){
+      const es = [], gap = 120 - diff*40, n = Math.floor(len/130);
+      for (let i=0; i<n; i++){
+        const x = x0 + 90 + i*130;
+        const gy = rnd(CEIL+50, FLOOR-50-gap);
+        es.push(ent("pillar", x, CEIL, 26, gy-CEIL));
+        es.push(ent("pillar", x, gy+gap, 26, FLOOR-(gy+gap)));
+        if (Math.random() < 0.7) es.push(ent("ruby", x+13, gy+gap/2, 8, 8));
+      }
+      return es;
+    }
+  },
+  stachel: { // Stachel-Korridor: enger werdender Schlauch
+    name:"Stachel-Korridor", weight:3, minDiff:0.1, col:PAL.rubyD,
+    build(x0, len, diff){
+      const es = [], n = Math.floor(len/48);
+      const squeeze = 60 + diff*70;
+      for (let i=0; i<n; i++){
+        const x = x0 + i*48;
+        const t = Math.sin(i/n * Math.PI);         // Mitte am engsten
+        const inTop = CEIL + t*squeeze*rnd(0.5,1);
+        const inBot = FLOOR - t*squeeze*rnd(0.5,1);
+        es.push(ent("spikeT", x, CEIL, 48, inTop-CEIL));
+        es.push(ent("spikeB", x, inBot, 48, FLOOR-inBot));
+        if (i%4===2) es.push(ent("ruby", x+24, (inTop+inBot)/2, 8, 8));
+      }
+      return es;
+    }
+  },
+  schacht: { // Schwerkraft-Schacht: Zone mit invertierter Gravitation
+    name:"Schwerkraft-Schacht", weight:2, minDiff:0.25, col:PAL.purple,
+    build(x0, len, diff){
+      const es = [ent("gravzone", x0, 0, len, H)];
+      const n = Math.floor(len/110);
+      for (let i=0; i<n; i++){
+        const x = x0 + 60 + i*110;
+        const hgt = rnd(50, 90+diff*60);
+        if (i%2===0) es.push(ent("pillar", x, CEIL, 24, hgt));
+        else         es.push(ent("pillar", x, FLOOR-hgt, 24, hgt));
+        es.push(ent("ruby", x+12, i%2===0 ? CEIL+hgt+30 : FLOOR-hgt-30, 8, 8));
+      }
+      return es;
+    }
+  },
+  bloecke: { // Bruchsteine: zerstörbar (Bumerang!) oder umfliegen
+    name:"Bruchstein-Halle", weight:2, minDiff:0.15, col:PAL.gold,
+    build(x0, len, diff){
+      const es = [], n = Math.floor(len/70);
+      for (let i=0; i<n; i++){
+        const x = x0 + 50 + i*70;
+        const cy = rnd(CEIL+60, FLOOR-60);
+        const stack = rndi(1, 2+Math.floor(diff*2));
+        for (let s=0; s<stack; s++) es.push(ent("block", x, cy + s*22 - stack*11, 20, 20));
+        if (Math.random()<0.5) es.push(ent("ruby", x+10, cy - stack*11 - 24, 8, 8));
+      }
+      return es;
+    }
+  },
+  geister: { // Geister-Halle: vertikal schwebende Gegner
+    name:"Drohnen-Sektor", weight:2, minDiff:0.35, col:PAL.leafL,
+    build(x0, len, diff){
+      const es = [], n = Math.floor(len/100);
+      for (let i=0; i<n; i++){
+        const x = x0 + 70 + i*100;
+        const g = ent("ghost", x, rnd(CEIL+60, FLOOR-60), 18, 18);
+        g.baseY = g.y; g.amp = rnd(30, 60+diff*50); g.spd = rnd(0.02, 0.04); g.ph = rnd(0, 6.28);
+        es.push(g);
+        if (i%3===1) es.push(ent("ruby", x+50, rnd(CEIL+50, FLOOR-50), 8, 8));
+      }
+      return es;
+    }
+  },
+  grotte: { // Volt-Depot: Belohnungsraum (Energie-System erhöht Chance)
+    name:"Volt-Depot", weight:1, minDiff:0, col:PAL.ruby, reward:true,
+    build(x0, len, diff){
+      const es = [];
+      for (let i=0; i<Math.floor(len/26); i++){
+        const x = x0 + 20 + i*26;
+        es.push(ent("ruby", x, H/2 + Math.sin(i*0.55)*90, 8, 8));
+        if (Math.random()<0.12) es.push(ent("heart", x, H/2 - Math.sin(i*0.55)*90, 10, 10));
+      }
+      return es;
+    }
+  }
+};
+function ent(type, x, y, w, h){ return {type, x, y, w, h, dead:false}; }
+
+// RoomDirector: erzeugt die zufällige Raum-Sequenz, streamt Entities
+const RoomDirector = {
+  rooms: [], nextX: 0, lastType: null,
+  reset(){ this.rooms = []; this.nextX = W + 40; this.lastType = null; },
+  // Räume generieren, bis Horizont abgedeckt (camX + 2 Screens)
+  ensure(camX, run){
+    while (this.nextX < camX + W*2){
+      const diff = Math.min(1, run.dist / 6000);
+      const keys = Object.keys(ROOM_TYPES).filter(k => {
+        const rt = ROOM_TYPES[k];
+        return diff >= rt.minDiff && k !== this.lastType;
+      });
+      // Gewichtete Wahl; Depot-Chance durch Energie-System erhöht
+      let pool = [];
+      keys.forEach(k => {
+        let w = ROOM_TYPES[k].weight;
+        if (ROOM_TYPES[k].reward) w += run.perks.grottoBonus * 10;
+        for (let i=0; i<w; i++) pool.push(k);
+      });
+      const key = pick(pool);
+      const rt = ROOM_TYPES[key];
+      const len = rt.reward ? rndi(360, 480) : rndi(420, 620);
+      const room = {key, name:rt.name, col:rt.col, x0:this.nextX, x1:this.nextX+len};
+      room.ents = rt.build(room.x0, len, diff);
+      // Pausenkorridor zwischen Räumen (Luft holen)
+      this.rooms.push(room);
+      this.nextX = room.x1 + rndi(70, 120);
+      this.lastType = key;
+    }
+    // alte Räume entsorgen
+    this.rooms = this.rooms.filter(r => r.x1 > camX - 60);
+  },
+  currentRoom(px){ return this.rooms.find(r => px >= r.x0 && px <= r.x1) || null; },
+  allEnts(){ return this.rooms.flatMap(r => r.ents); }
+};
+
+/* =====================================================================
+   RUN-ZUSTAND & GAMEPLAY
+   ===================================================================== */
+const Run = {
+  perks:null, item:"none",
+  x:0, y:0, vy:0, dist:0, speed:0,
+  hp:0, shield:false, fairy:false, inv:0,
+  rubies:0, camX:0, gravFlip:false,
+  boomT:0, booms:[], hookMeter:60, hooked:false,
+  dashT:0, lastTap:0, dead:false, t:0,
+  start(itemId){
+    this.perks = Meta.perks();
+    this.item = itemId;
+    this.x = 70; this.y = H/2; this.vy = 0;
+    this.dist = 0; this.speed = 1.6; this.camX = 0;
+    this.hp = this.perks.maxHP;
+    this.shield = this.perks.shield; this.fairy = this.perks.fairy;
+    this.inv = 0; this.rubies = 0; this.gravFlip = false;
+    this.boomT = 0; this.booms = []; this.hookMeter = 60; this.hooked = false;
+    this.dashT = 0; this.dead = false; this.t = 0;
+    RoomDirector.reset();
+    particles.length = 0; toasts.length = 0;
+  },
+  flap(){
+    let p = 4.2 * this.perks.flapMult;
+    if (this.item === "roc") p *= 1.25;
+    this.vy = this.gravFlip ? p : -p;
+    Sound.flap();
+    spawnParticles(this.x, this.y+6, 4, PAL.white);
+  },
+  tryDash(){
+    if (!this.perks.dash || this.dashT > 0) return;
+    this.dashT = 14;
+    Sound.dash();
+    spawnParticles(this.x-8, this.y, 10, PAL.green);
+  },
+  hurt(){
+    if (this.inv > 0 || this.dead) return;
+    if (this.shield){ this.shield = false; this.inv = 60; Sound.hurt(); toast("Schild zerbrochen!"); return; }
+    this.hp--;
+    Sound.hurt();
+    spawnParticles(this.x, this.y, 12, PAL.red);
+    if (this.hp <= 0){
+      if (this.fairy){
+        this.fairy = false; this.hp = Math.max(1, Math.ceil(this.perks.maxHP/2));
+        this.inv = 120; Sound.revive(); toast("Backup-Kern aktiviert!"); return;
+      }
+      this.die(); return;
+    }
+    this.inv = 75;
+  },
+  die(){
+    this.dead = true;
+    Sound.over();
+    // Run-Währung -> Permanent-Logik
+    Meta.rubies += this.rubies;
+    Meta.runs++;
+    if (this.dist > Meta.bestDist) Meta.bestDist = Math.floor(this.dist);
+    Meta.save();
+    setScreen("gameover");
+  },
+  update(){
+    if (this.dead) return;
+    this.t++;
+    // Tempo & Distanz
+    this.speed = 1.6 + Math.min(1.4, this.dist/5000);
+    const spd = this.dashT > 0 ? this.speed + 3.2 : this.speed;
+    if (this.dashT > 0) this.dashT--;
+    this.camX += spd; this.x = this.camX + 70;
+    this.dist += spd;
+    // Räume streamen; Schwerkraft-Zone prüfen
+    RoomDirector.ensure(this.camX, this);
+    this.gravFlip = false;
+    const room = RoomDirector.currentRoom(this.x);
+    if (room) for (const e of room.ents)
+      if (e.type === "gravzone" && this.x >= e.x && this.x <= e.x+e.w) this.gravFlip = true;
+    // Physik
+    let g = 0.22 * this.perks.gravMult;
+    if (this.item === "roc" && ((!this.gravFlip && this.vy > 0) || (this.gravFlip && this.vy < 0))) g *= 0.65;
+    if (this.gravFlip) g = -g;
+    // Magnet-Anker: Halten = verankern
+    this.hooked = false;
+    if (this.item === "hook" && input.held && this.hookMeter > 0 && this.t - input.heldSince > 12){
+      this.hooked = true; this.vy = 0; this.hookMeter--;
+    } else {
+      this.vy += g;
+      if (this.hookMeter < 60) this.hookMeter += 0.35;
+    }
+    this.vy = Math.max(-6, Math.min(6, this.vy));
+    this.y += this.vy;
+    // Boden / Decke
+    if (this.y > FLOOR-8){ this.y = FLOOR-8; this.hurt(); this.vy = this.gravFlip ? 0 : -3; }
+    if (this.y < CEIL+8){ this.y = CEIL+8; this.hurt(); this.vy = this.gravFlip ? 3 : 0; }
+    if (this.inv > 0) this.inv--;
+    // Bumerang: auto-Wurf
+    if (this.item === "boom"){
+      this.boomT++;
+      if (this.boomT > 110){ this.boomT = 0; Sound.throwB(); this.booms.push({x:this.x, y:this.y, vx:4.5, age:0}); }
+      for (const b of this.booms){
+        b.x += b.vx + spd*0.4; b.age++;
+        if (b.age > 40) b.vx -= 0.35;                 // kehrt zurück
+        b.y += Math.sin(b.age*0.3)*0.8;
+      }
+      this.booms = this.booms.filter(b => b.age < 110 && b.x > this.camX - 20);
+    }
+    // Kollisionen & Sammeln
+    const px = this.x, py = this.y, pr = 7;
+    for (const room2 of RoomDirector.rooms){
+      if (room2.x1 < this.camX - 20 || room2.x0 > this.camX + W + 20) continue;
+      for (const e of room2.ents){
+        if (e.dead || e.type === "gravzone") continue;
+        // Geister-Bewegung
+        if (e.type === "ghost") e.y = e.baseY + Math.sin(this.t*e.spd + e.ph)*e.amp;
+        // Magnet
+        if (e.type === "ruby" && this.perks.magnetR > 0){
+          const dx = px-e.x, dy = py-e.y, d = Math.hypot(dx,dy);
+          if (d < this.perks.magnetR && d > 1){ e.x += dx/d*2.6; e.y += dy/d*2.6; }
+        }
+        // Bumerang-Treffer
+        if ((e.type === "block" || e.type === "ghost") && this.item === "boom"){
+          for (const b of this.booms){
+            if (b.x > e.x-4 && b.x < e.x+e.w+4 && b.y > e.y-14 && b.y < e.y+e.h+14){
+              e.dead = true; Sound.smash(); spawnParticles(e.x+e.w/2, e.y+e.h/2, 8, PAL.gold);
+              if (Math.random()<0.4) room2.ents.push(ent("ruby", e.x+e.w/2, e.y, 8, 8));
+            }
+          }
+        }
+        // Spieler-Kollision (AABB vs. Kreis grob)
+        const hit = px+pr > e.x && px-pr < e.x+e.w && py+pr > e.y && py-pr < e.y+e.h;
+        if (!hit) continue;
+        if (e.type === "ruby"){
+          e.dead = true;
+          const v = Math.round(1 * this.perks.rubyMult * 10)/10;
+          this.rubies += v;
+          Sound.volt();
+          spawnParticles(e.x, e.y, 5, PAL.ruby);
+        } else if (e.type === "heart"){
+          e.dead = true;
+          if (this.hp < this.perks.maxHP){ this.hp++; toast("+1 Energie-Kern"); }
+          else { this.rubies += 5; }
+          Sound.core();
+          spawnParticles(e.x, e.y, 6, PAL.red);
+        } else if (this.dashT > 0 && (e.type === "block" || e.type === "ghost")){
+          e.dead = true; spawnParticles(e.x, e.y, 8, PAL.green);  // Dash zerschmettert
+        } else {
+          this.hurt();
+        }
+      }
+    }
+  }
+};
+
+/* =====================================================================
+   SOUND (Web Audio API — Chiptune-SFX & Musik-Loop, keine Assets)
+   ===================================================================== */
+const Sound = (() => {
+  let ac = null, mOn = true, timer = null, step = 0;
+  function A(){
+    if (!ac){ try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){ return null; } }
+    if (ac.state === "suspended") ac.resume();
+    return ac;
+  }
+  function tone(f0, f1, dur, type, vol, when){
+    const a = A(); if (!a) return;
+    const t = a.currentTime + (when || 0);
+    const o = a.createOscillator(), g = a.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t);
+    if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(t); o.stop(t + dur + 0.05);
+  }
+  const BASS = [110, 110, 147, 110, 131, 110, 165, 147];   // 8-Step-Loop
+  const ARP  = [440, 554, 659, 880];
+  function music(){
+    if (timer) return;
+    const a = A(); if (!a) return;
+    timer = setInterval(() => {
+      if (!mOn) return;
+      tone(BASS[step % 8], BASS[step % 8], 0.18, "triangle", 0.045);
+      if (screen === "play" && step % 2 === 0)
+        tone(ARP[(step >> 1) % 4], ARP[(step >> 1) % 4], 0.09, "square", 0.018);
+      step++;
+    }, 220);
+  }
+  return {
+    unlock(){ if (A()) music(); },              // 1. Nutzer-Geste startet Audio
+    isOn(){ return mOn; },
+    toggle(){ mOn = !mOn; },
+    flap(){ tone(300, 620, 0.08, "square", 0.045); },
+    volt(){ tone(880, 880, 0.05, "square", 0.045); tone(1319, 1319, 0.08, "square", 0.045, 0.05); },
+    core(){ tone(523, 1047, 0.15, "triangle", 0.07); },
+    hurt(){ tone(220, 55, 0.25, "sawtooth", 0.08); },
+    dash(){ tone(200, 950, 0.14, "sawtooth", 0.05); },
+    throwB(){ tone(520, 180, 0.12, "square", 0.035); },
+    smash(){ tone(160, 40, 0.16, "square", 0.07); },
+    buy(){ [523, 659, 784, 1047].forEach((f, i) => tone(f, f, 0.09, "square", 0.05, i * 0.07)); },
+    deny(){ tone(170, 120, 0.14, "square", 0.05); },
+    click(){ tone(740, 740, 0.04, "square", 0.035); },
+    revive(){ [262, 392, 523, 784].forEach((f, i) => tone(f, f, 0.11, "triangle", 0.07, i * 0.09)); },
+    over(){ [392, 330, 262, 196].forEach((f, i) => tone(f, f, 0.2, "triangle", 0.07, i * 0.16)); }
+  };
+})();
+
+/* =====================================================================
+   INPUT (Ein-Tipp-Steuerung + Halten für Magnet-Anker)
+   ===================================================================== */
+const input = {held:false, heldSince:0};
+function press(x, y){
+  Sound.unlock();
+  if (screen === "play"){
+    input.held = true; input.heldSince = Run.t;
+    const now = performance.now();
+    if (now - Run.lastTap < 240) Run.tryDash();   // Doppel-Tipp = Air-Dash
+    Run.lastTap = now;
+    Run.flap();
+  } else {
+    uiTap(x, y);
+  }
+}
+function release(){ input.held = false; }
+function canvasPos(e){
+  const r = cvs.getBoundingClientRect();
+  const cx = (e.touches ? e.changedTouches[0].clientX : e.clientX);
+  const cy = (e.touches ? e.changedTouches[0].clientY : e.clientY);
+  return [ (cx - r.left) / r.width * W, (cy - r.top) / r.height * H ];
+}
+cvs.addEventListener("pointerdown", e => { e.preventDefault(); press(...canvasPos(e)); });
+cvs.addEventListener("pointerup",   e => { e.preventDefault(); release(); });
+addEventListener("keydown", e => { if (e.code === "Space" && !e.repeat) press(-1,-1); });
+addEventListener("keyup",   e => { if (e.code === "Space") release(); });
+
+// ---------- Partikel & Toasts ----------
+const particles = [], toasts = [];
+function spawnParticles(x, y, n, col){
+  for (let i=0;i<n;i++) particles.push({x, y, vx:rnd(-2,2), vy:rnd(-2,2), life:rndi(12,26), col});
+}
+function toast(msg){ toasts.push({msg, life:90}); }
+
+/* =====================================================================
+   RENDERING (16-Bit Pixel-Art, alles prozedural gezeichnet)
+   ===================================================================== */
+function px(x, y, w, h, col){ ctx.fillStyle = col; ctx.fillRect(Math.round(x), Math.round(y), w, h); }
+function text(s, x, y, col, size=8, align="left"){
+  ctx.fillStyle = col; ctx.font = `bold ${size}px monospace`;
+  ctx.textAlign = align; ctx.textBaseline = "top";
+  ctx.fillText(s, Math.round(x), Math.round(y));
+}
+
+function drawHero(x, y, flip, blink){
+  if (blink && Math.floor(Run.t/4)%2===0) return;
+  x = Math.round(x); y = Math.round(y);
+  ctx.save();
+  ctx.translate(x, y);
+  if (flip) ctx.scale(1, -1);                  // Schwerkraft-Schacht: kopfüber
+  ctx.globalAlpha = 0.10 + 0.05*Math.sin(Run.t*0.2);   // Energie-Aura
+  px(-12, -12, 24, 24, PAL.tealL);
+  px(-10, -14, 20, 28, PAL.tealL);
+  ctx.globalAlpha = 1;
+  // Pixar-Look NUR für die Figur: weiches Downsampling der HD-Vorlage
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(HERO[Math.sin(Run.t*0.5) > 0 ? 0 : 1], -13, -12, 26, 24);
+  ctx.imageSmoothingEnabled = false;
+  ctx.restore();
+  if (Run.t % 7 === 0) spawnParticles(Run.camX + x + rnd(-10,10), y + rnd(-10,10), 1, PAL.gold);
+  if (Run.shield){ ctx.strokeStyle = PAL.blue; ctx.strokeRect(x-13, y-12, 26, 24); }
+}
+
+// Parallax-Helfer: wiederholt Elemente nahtlos über die Screenbreite
+function para(camX, spacing, speed, fn){
+  const off = camX * speed;
+  const first = Math.floor(off / spacing) - 1;
+  for (let i=first; i*spacing < off + W + spacing; i++)
+    fn(i*spacing - off, i);
+}
+function hash(i){ const s = Math.sin(i*127.1)*43758.5; return s - Math.floor(s); }
+
+function drawBackground(camX){
+  const bio = biomeAt(camX + W/2);
+  const T = performance.now();
+  if (bio === "dungeon"){
+    // --- Panel 1: Verlies aus blauem Stein, Ketten, Moos ---
+    px(0, 0, W, H, PAL.dgBg2);
+    // Ziegelwand (halbe Parallax)
+    for (let ry=0; ry*20 < H; ry++){
+      const y = ry*20;
+      const shift = (ry%2)*18;
+      for (let bx=-36; bx<W+36; bx+=36){
+        const wx = bx - (camX*0.4 + shift) % 36;
+        px(wx, y, 34, 18, hash(ry*31+Math.floor((wx+camX*0.4)/36))>0.85 ? PAL.dgBrickD : PAL.dgBrick);
+      }
+      px(0, y+18, W, 2, PAL.dgLine);
+    }
+    // Moosflecken & Ketten
+    para(camX, 150, 0.4, (sx,i) => {
+      if (hash(i)>0.5) px(sx, 60+hash(i*3)*260, 14+hash(i*7)*10, 8, PAL.moss);
+    });
+    para(camX, 130, 0.7, (sx,i) => {
+      if (hash(i+40)<0.45) return;
+      const len = 30 + hash(i)*50;
+      px(sx-4, CEIL, 8, 4, PAL.metal);                    // Halterung
+      for (let cy=CEIL+4; cy<CEIL+len; cy+=6){            // Kettenglieder
+        px(sx-2, cy, 4, 4, PAL.chain); px(sx-1, cy+1, 2, 2, PAL.dgBg2);
+      }
+    });
+    // Fackeln
+    para(camX, 260, 0.7, (sx,i) => {
+      if (hash(i+9)<0.4) return;
+      px(sx-1, 90, 3, 10, PAL.woodD);
+      const fl = Math.sin(T*0.02+i)*2;
+      px(sx-3, 82+fl, 6, 8, PAL.torch); px(sx-1, 78+fl, 3, 5, PAL.gold);
+    });
+    // Decke & Boden: Steinquader
+    px(0, 0, W, CEIL, PAL.stone); px(0, CEIL-3, W, 3, PAL.stoneDark);
+    px(0, FLOOR, W, H-FLOOR, PAL.stone); px(0, FLOOR, W, 3, PAL.stoneLite);
+    para(camX, 32, 1, sx => { px(sx, FLOOR+8, 26, 12, PAL.stoneDark); px(sx+2, FLOOR+10, 22, 3, PAL.stoneLite); });
+  }
+  else if (bio === "forest"){
+    // --- Panel 2: Heller Wald, Wolken, Bäume ---
+    for (let i=0; i<8; i++) px(0, i*H/8, W, H/8+1, shade(PAL.sky, 0.22 - i*0.05));
+    para(camX, 190, 0.15, (sx,i) => {                     // Wolken
+      const cy = 50 + hash(i)*110;
+      px(sx, cy, 44, 10, PAL.cloud); px(sx+8, cy-6, 26, 8, PAL.cloud); px(sx+14, cy+8, 20, 6, PAL.cloud);
+    });
+    ctx.globalAlpha = 0.55;                               // Distanz-Nebel
+    para(camX, 120, 0.35, (sx,i) => {                     // Baumreihe hinten
+      const th = 90 + hash(i)*70;
+      px(sx, FLOOR-th, 40, th, PAL.leafD);
+      px(sx+6, FLOOR-th-14, 28, 18, PAL.leafD);
+    });
+    ctx.globalAlpha = 1;
+    para(camX, 170, 0.6, (sx,i) => {                      // Bäume vorn
+      if (hash(i+5)<0.3) return;
+      const th = 120 + hash(i)*60;
+      px(sx+14, FLOOR-40, 10, 40, PAL.trunk);
+      px(sx, FLOOR-th, 38, th-50, PAL.leaf);
+      px(sx+5, FLOOR-th-16, 28, 22, PAL.leaf);
+      px(sx+4, FLOOR-th+6, 12, 8, PAL.leafL);
+      px(sx+22, FLOOR-th+22, 10, 6, PAL.leafL);
+    });
+    // Blätterdach als Decke
+    px(0, 0, W, CEIL, PAL.leafD);
+    para(camX, 24, 1, sx => px(sx, CEIL-4, 16, 8, PAL.leaf));
+    para(camX, 40, 1, (sx,i) => { if(hash(i)>0.5) px(sx, CEIL+4, 8, 5, PAL.leafL); });
+    // Wiese
+    px(0, FLOOR, W, H-FLOOR, PAL.grass);
+    px(0, FLOOR, W, 4, PAL.leafL); px(0, FLOOR+4, W, 2, PAL.grassD);
+    para(camX, 26, 1, (sx,i) => { if(hash(i+2)>0.4) px(sx, FLOOR+10+hash(i)*16, 4, 6, PAL.grassD); });
+  }
+  else {
+    // --- Panel 3: Lava-Höhle, Vulkane, Glut ---
+    for (let i=0; i<8; i++) px(0, i*H/8, W, H/8+1, shade(PAL.lvSky2, -0.5 + i*0.09));
+    ctx.globalAlpha = 0.8;                                // Tiefen-Dunst
+    para(camX, 240, 0.3, (sx,i) => {                      // Vulkane
+      const vh = 90 + hash(i)*80, vw = 90 + hash(i*3)*50;
+      ctx.fillStyle = PAL.lvRock;
+      ctx.beginPath();
+      ctx.moveTo(sx, FLOOR); ctx.lineTo(sx+vw*0.4, FLOOR-vh); ctx.lineTo(sx+vw*0.6, FLOOR-vh); ctx.lineTo(sx+vw, FLOOR);
+      ctx.fill();
+      px(sx+vw*0.42, FLOOR-vh, vw*0.16, 4, PAL.lava);     // glühender Krater
+      px(sx+vw*0.46, FLOOR-vh-4, vw*0.08, 4, PAL.lavaL);
+      for (let ly=FLOOR-vh+10; ly<FLOOR-10; ly+=24)       // Lava-Rinnsale
+        px(sx+vw*0.48+Math.sin(ly)*4, ly, 3, 14, PAL.lava);
+    });
+    ctx.globalAlpha = 1;
+    para(camX, 90, 0.8, (sx,i) => {                       // aufsteigende Glut
+      const ey = FLOOR - ((T*0.03 + hash(i)*300) % (FLOOR-CEIL-20));
+      px(sx+hash(i*7)*40, ey, 2, 2, hash(i)>0.5 ? PAL.lava : PAL.lavaL);
+    });
+    // Felsdecke mit Glut-Rissen
+    px(0, 0, W, CEIL, PAL.lvRock); px(0, CEIL-3, W, 3, PAL.lvRockL);
+    para(camX, 70, 1, (sx,i) => { if(hash(i)>0.5) px(sx, CEIL-2, 10+hash(i*3)*14, 2, PAL.lava); });
+    // Lavasee mit Felskante
+    px(0, FLOOR, W, H-FLOOR, PAL.lava);
+    para(camX, 46, 0.9, (sx,i) => px(sx, FLOOR+8+Math.sin(T*0.004+i)*3, 20, 5, PAL.lavaL));
+    px(0, FLOOR, W, 6, PAL.lvRock); px(0, FLOOR, W, 2, PAL.lvRockL);
+    for (let i=0; i<5; i++)                               // Lava-Glühen
+      px(0, FLOOR-10-i*4, W, 4, "rgba(255,90,32," + (0.10*(1-i/5)).toFixed(3) + ")");
+  }
+  // Ambient Occlusion: weiche Kernschatten an Decke & Boden (Raumtiefe)
+  for (let i=0; i<6; i++){
+    const a = (0.20*(1-i/6)).toFixed(3);
+    px(0, CEIL+i*2, W, 2, "rgba(0,0,0," + a + ")");
+    px(0, FLOOR-2-i*2, W, 2, "rgba(0,0,0," + a + ")");
+  }
+}
+
+function drawEnt(e, camX){
+  const sx = e.x - camX;
+  if (sx + e.w < -10 || sx > W+10) return;
+  switch(e.type){
+    case "pillar": {
+      const bio = biomeAt(e.x);
+      if (bio === "forest"){                       // Hecken-Säule mit Stamm
+        px(sx+e.w/2-4, e.y, 8, e.h, PAL.trunk);
+        for (let yy=e.y; yy<e.y+e.h-4; yy+=13){
+          px(sx-2, yy, e.w+4, 10, PAL.leaf);
+          px(sx-2, yy, e.w+4, 2, shade(PAL.leaf, 0.25));
+          px(sx-2, yy+8, e.w+4, 2, shade(PAL.leaf, -0.3));
+          px(sx+3, yy+2, 8, 4, PAL.leafL);
+        }
+        px(sx, e.y, e.w, 4, PAL.leafL);
+      } else if (bio === "lava"){                  // Basalt mit Glut-Rissen
+        px(sx, e.y, e.w, e.h, PAL.lvRock);
+        px(sx, e.y, 3, e.h, shade(PAL.lvRock, 0.6));
+        px(sx+e.w-3, e.y, 3, e.h, shade(PAL.lvRock, -0.5));
+        for (let yy=e.y+10; yy<e.y+e.h-6; yy+=20){
+          px(sx+4, yy, e.w-8, 2, PAL.lava);
+          px(sx+e.w/2-1, yy-5, 2, 5, PAL.lava);
+        }
+      } else {                                     // Verlies-Stein
+        px(sx, e.y, e.w, e.h, PAL.stone);
+        px(sx, e.y, 3, e.h, shade(PAL.stone, 0.35));      // Zylinder-Shading
+        px(sx+3, e.y, 4, e.h, shade(PAL.stone, 0.15));
+        px(sx+e.w-7, e.y, 4, e.h, shade(PAL.stone, -0.15));
+        px(sx+e.w-3, e.y, 3, e.h, shade(PAL.stone, -0.35));
+        for (let yy=e.y+8; yy<e.y+e.h-4; yy+=16) px(sx+6, yy, e.w-12, 3, PAL.stoneDark);
+        if (hash(e.x)>0.6) px(sx+4, e.y+e.h-8, 8, 5, PAL.moss);
+      }
+      break;
+    }
+    case "spikeT": case "spikeB": {
+      px(sx, e.y, e.w, e.h, PAL.stoneDark);
+      const down = e.type === "spikeT";
+      for (let i=0; i<e.w; i+=8){
+        const tipY = down ? e.y+e.h+6 : e.y-6;
+        const baseY = down ? e.y+e.h : e.y;
+        ctx.fillStyle = shade(PAL.spike, -0.3);
+        ctx.beginPath();
+        ctx.moveTo(sx+i, baseY); ctx.lineTo(sx+i+8, baseY); ctx.lineTo(sx+i+4, tipY);
+        ctx.fill();
+        ctx.fillStyle = shade(PAL.spike, 0.2);            // Lichtkante links
+        ctx.beginPath();
+        ctx.moveTo(sx+i, baseY); ctx.lineTo(sx+i+4, baseY); ctx.lineTo(sx+i+4, tipY);
+        ctx.fill();
+      }
+      break;
+    }
+    case "block":                                  // Bruchstein (zerstörbar)
+      dropShadow(sx+e.w/2, e.y+e.h, 22);
+      px(sx, e.y, e.w, e.h, PAL.woodD);
+      px(sx+2, e.y+2, e.w-4, e.h-4, PAL.wood);
+      px(sx+1, e.y+1, e.w-2, 2, shade(PAL.wood, 0.35));   // Bevel-Kanten
+      px(sx+1, e.y+1, 2, e.h-2, shade(PAL.wood, 0.15));
+      px(sx+1, e.y+e.h-3, e.w-2, 2, shade(PAL.wood, -0.35));
+      px(sx+e.w-3, e.y+1, 2, e.h-2, shade(PAL.wood, -0.2));
+      px(sx+5, e.y+5, 2, 6, PAL.woodD);            // Riss
+      px(sx+7, e.y+9, 4, 2, PAL.woodD);
+      px(sx+12, e.y+4, 2, 4, PAL.woodD);
+      break;
+    case "ghost": {                                // Nano-Drohne
+      const gy = Math.round(e.y);
+      const sq = Math.sin(Run.t*0.15 + e.ph)*1.5;  // Atmen
+      dropShadow(sx+9, gy+e.h, 20);
+      ctx.drawImage(SPRITES.deku, Math.round(sx-3), Math.round(gy-3+sq), 24, 22);
+      break;
+    }
+    case "ruby": {
+      const bob = Math.sin((Run.t + e.x)*0.1)*2;
+      ctx.drawImage(SPRITES.ruby, Math.round(sx-1), Math.round(e.y-2+bob), 10, 10);
+      if ((Run.t + e.x) % 40 < 3) px(sx+6, e.y-4+bob, 2, 2, PAL.white);   // Funkeln
+      break;
+    }
+    case "heart":
+      ctx.drawImage(SPRITES.heart, Math.round(sx-1), Math.round(e.y), 12, 9);
+      break;
+    case "gravzone":
+      ctx.globalAlpha = 0.12; px(sx, CEIL, e.w, FLOOR-CEIL, PAL.purple); ctx.globalAlpha = 1;
+      for (let i=20; i<e.w; i+=60){
+        const ay = (Run.t*1.5 + i*7) % (FLOOR-CEIL-20);
+        text("▲", sx+i, FLOOR-ay-20, PAL.purple, 10);
+      }
+      break;
+  }
+}
+
+// Schlagschatten am Boden — Größe/Deckkraft nach Flughöhe (3D-Tiefe)
+function dropShadow(cx, y, w){
+  const d = 1 - (FLOOR - y)/240;
+  if (d <= 0.08 || y > FLOOR) return;
+  ctx.globalAlpha = 0.28*d;
+  px(cx - (w*d)/2, FLOOR+2, w*d, 3, PAL.black);
+  ctx.globalAlpha = 1;
+}
+
+function drawItemBox(x, y, iconKey, size=26){
+  px(x, y, size, size, PAL.black);
+  px(x+1, y+1, size-2, size-2, PAL.dgBrickD);
+  px(x+1, y+1, size-2, 2, PAL.stoneLite);          // Rahmen-Glanz wie im Artwork
+  px(x+1, y+size-3, size-2, 2, PAL.dgLine);
+  const ico = SPRITES[iconKey];
+  if (ico) ctx.drawImage(ico, x+(size-18)/2, y+(size-18)/2, 18, 18);
+}
+function drawHUD(){
+  // Herzen (Sprites, leere ausgegraut)
+  for (let i=0; i<Run.perks.maxHP; i++){
+    if (i >= Run.hp) ctx.globalAlpha = 0.3;
+    ctx.drawImage(SPRITES.heart, 8+i*16, 6, 14, 11);
+    ctx.globalAlpha = 1;
+  }
+  // Item-Box oben rechts (wie Referenz-Panels)
+  const it = ITEMS.find(i => i.id === Run.item);
+  drawItemBox(W-32, 5, it.icon);
+  // Volt & Distanz
+  ctx.drawImage(SPRITES.ruby, W-102, 6, 9, 9);
+  text(Math.floor(Run.rubies), W-90, 6, PAL.white, 10);
+  text(Math.floor(Run.dist/10)+"m", W-90, 18, PAL.white, 8);
+  // Raum-Name
+  const room = RoomDirector.currentRoom(Run.x);
+  if (room) text(room.name, W/2, 8, PAL.white, 9, "center");
+  // Anker-Energie
+  if (Run.item === "hook"){
+    px(8, 22, 62, 6, PAL.black);
+    px(9, 23, Math.max(0, Run.hookMeter), 4, PAL.blue);
+  }
+  // Bumerang (Holz-Sprite, rotierend, mit Wirbel-Spur wie Panel 2)
+  if (Run.item === "boom") for (const b of Run.booms){
+    const bx = b.x - Run.camX;
+    ctx.save(); ctx.translate(bx, b.y); ctx.rotate(b.age*0.45);
+    ctx.drawImage(SPRITES.boom, -6, -6, 12, 12);
+    ctx.restore();
+    if (b.age % 3 === 0) spawnParticles(b.x, b.y, 1, PAL.sky2);
+  }
+  if (Run.gravFlip) text("SCHWERKRAFT ↑", W/2, 24, PAL.purple, 8, "center");
+}
+
+/* =====================================================================
+   SCREENS & UI
+   ===================================================================== */
+let screen = "title";
+let selectedItem = "none";
+let uiButtons = [];
+function setScreen(s){ screen = s; }
+function button(x, y, w, h, label, cb, col=PAL.stone, txtCol=PAL.white, size=10){
+  px(x, y, w, h, PAL.black); px(x+1, y+1, w-2, h-2, col);
+  px(x+1, y+1, w-2, 2, "rgba(255,255,255,0.25)");
+  text(label, x+w/2, y+h/2-size/2, txtCol, size, "center");
+  uiButtons.push({x, y, w, h, cb});
+}
+function uiTap(x, y){
+  for (const b of uiButtons) if (x>=b.x && x<=b.x+b.w && y>=b.y && y<=b.y+b.h){ Sound.click(); b.cb(); return; }
+}
+
+function drawTitle(){
+  drawBackground(performance.now()*0.03);
+  px(0, 0, W, H, "rgba(13,11,26,0.45)");
+  text("CIRCUIT SPRITE", W/2, 90, PAL.tealL, 24, "center");
+  text("~ NEO NEXUS ~", W/2, 124, PAL.amber, 11, "center");
+  const bob = Math.sin(performance.now()*0.004)*6;
+  Run.t = performance.now()*0.06;
+  // Großer Held mit leuchtenden Energie-Schwingen
+  const ly = 176 + bob;
+  const wy = Math.sin(Run.t*0.5) > 0 ? -8 : 2;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(HERO[Math.sin(Run.t*0.5) > 0 ? 0 : 1], W/2-46, ly-18, 92, 85);
+  ctx.imageSmoothingEnabled = false;
+  if (Math.random() < 0.3) spawnParticles(W/2 + rnd(-30,30), ly + rnd(0,45), 1, PAL.gold);
+  ctx.drawImage(SPRITES.ruby, W/2-42, 244, 10, 10);
+  text(Meta.rubies + " Volt", W/2-28, 245, PAL.white, 10);
+  if (Meta.bestDist > 0) text("Rekord: " + Math.floor(Meta.bestDist/10) + "m", W/2, 262, PAL.stoneLite, 9, "center");
+  button(W/2-70, 300, 140, 34, "START", () => setScreen("items"), PAL.greenD);
+  button(W/2-70, 344, 140, 34, "UPGRADE-NEXUS", () => setScreen("temple"), PAL.stone, PAL.gold, 8);
+  button(W/2-70, 386, 140, 24, "MUSIK: " + (Sound.isOn() ? "AN" : "AUS"), () => Sound.toggle(), PAL.stone, PAL.stoneLite, 8);
+  text("Tippen = Fliegen", W/2, 420, PAL.stoneLite, 8, "center");
+}
+
+function drawTemple(){
+  // Nexus-Hintergrund
+  px(0, 0, W, H, PAL.bgMid);
+  for (let i=0; i<4; i++) px(i*90+10, 0, 14, H, PAL.stoneDark);      // Säulen
+  px(0, 0, W, 40, PAL.stoneDark); px(0, 36, W, 4, PAL.stone);
+  // Fackeln
+  for (const fx of [30, W-30]){
+    px(fx-2, 46, 4, 12, PAL.goldD);
+    const fl = Math.sin(performance.now()*0.02 + fx)*2;
+    px(fx-3, 38+fl, 6, 8, PAL.torch); px(fx-1, 34+fl, 3, 5, PAL.gold);
+  }
+  text("UPGRADE-NEXUS", W/2, 10, PAL.gold, 13, "center");
+  ctx.drawImage(SPRITES.ruby, W/2-62, 24, 10, 10);
+  text(Meta.rubies + " Volt", W/2-50, 26, PAL.white, 9);
+  // 3 Äste als Spalten
+  const branches = ["mut", "weisheit", "kraft"];
+  branches.forEach((br, ci) => {
+    const bx = 10 + ci*103, bw = 97;
+    const bm = BRANCH_META[br];
+    text(bm.icon, bx+bw/2, 52, bm.col, 12, "center");
+    text(bm.short, bx+bw/2, 66, bm.col, 8, "center");
+    const nodes = SKILL_TREE.filter(n => n.branch === br);
+    nodes.forEach((n, ri) => {
+      const ny = 84 + ri*102;
+      const lvl = Meta.lvl(n.id);
+      const maxed = lvl >= n.max;
+      const locked = n.req && Meta.lvl(n.req) < Meta.node(n.req).max;
+      const afford = Meta.canBuy(n);
+      // Verbindungslinie
+      if (ri > 0) px(bx+bw/2-1, ny-18, 2, 16, locked ? PAL.stoneDark : bm.col);
+      // Node-Kachel
+      const col = maxed ? bm.col : locked ? PAL.stoneDark : PAL.stone;
+      px(bx, ny, bw, 86, PAL.black);
+      px(bx+1, ny+1, bw-2, 84, col);
+      px(bx+1, ny+1, bw-2, 2, "rgba(255,255,255,0.2)");
+      text(n.name, bx+bw/2, ny+6, maxed ? PAL.black : PAL.white, 8, "center");
+      // Level-Pips
+      for (let p=0; p<n.max; p++)
+        px(bx+bw/2 - n.max*5 + p*10, ny+18, 7, 7, p < lvl ? PAL.gold : PAL.bgDark);
+      // Beschreibung (2-zeilig umbrechen)
+      const d = n.desc(Math.max(1,lvl+ (maxed?0:1)));
+      text(d.slice(0, 17), bx+bw/2, ny+30, maxed ? PAL.black : PAL.stoneLite, 7, "center");
+      if (d.length > 17) text(d.slice(17), bx+bw/2, ny+39, maxed ? PAL.black : PAL.stoneLite, 7, "center");
+      // Kauf-Zeile
+      if (maxed) text("MAX", bx+bw/2, ny+56, PAL.black, 9, "center");
+      else if (locked) text("Gesperrt", bx+bw/2, ny+56, PAL.stoneLite, 8, "center");
+      else {
+        px(bx+bw/2-24, ny+53, 5, 7, PAL.amber);
+        text(n.cost[lvl], bx+bw/2-16, ny+53, afford ? PAL.gold : PAL.red, 9);
+        button(bx+8, ny+64, bw-16, 17, "KAUFEN", () => {
+          if (Meta.buy(n)){ Sound.buy(); toast("Installiert: " + n.name); } else Sound.deny();
+        }, afford ? PAL.greenD : PAL.stoneDark, afford ? PAL.white : PAL.stoneLite, 8);
+      }
+    });
+  });
+  button(W/2-60, H-36, 120, 26, "ZURÜCK", () => setScreen("title"));
+}
+
+function drawItems(){
+  drawBackground(0);
+  px(0, 0, W, H, "rgba(13,11,26,0.6)");
+  text("WÄHLE DEIN MODUL", W/2, 40, PAL.tealL, 14, "center");
+  ITEMS.forEach((it, i) => {
+    const iy = 80 + i*74;
+    const sel = selectedItem === it.id;
+    px(30, iy, W-60, 62, PAL.black);
+    px(31, iy+1, W-62, 60, sel ? PAL.stoneLite : PAL.stone);
+    if (sel){ ctx.strokeStyle = PAL.gold; ctx.lineWidth = 2; ctx.strokeRect(31, iy+1, W-62, 60); }
+    drawItemBox(40, iy+16, it.icon, 30);
+    text(it.name, 80, iy+10, sel ? PAL.gold : PAL.white, 11);
+    text(it.desc[0], 80, iy+28, PAL.black, 8);
+    text(it.desc[1], 80, iy+40, PAL.black, 8);
+    uiButtons.push({x:30, y:iy, w:W-60, h:62, cb:() => { selectedItem = it.id; }});
+  });
+  button(W/2-70, H-80, 140, 36, "LOS GEHT'S!", () => { Run.start(selectedItem); setScreen("play"); }, PAL.greenD);
+  button(W/2-70, H-38, 140, 24, "ZURÜCK", () => setScreen("title"), PAL.stone, PAL.stoneLite, 8);
+}
+
+function drawGameOver(){
+  drawBackground(Run.camX);
+  for (const r of RoomDirector.rooms) for (const e of r.ents) if (!e.dead) drawEnt(e, Run.camX);
+  px(0, 0, W, H, "rgba(13,11,26,0.75)");
+  text("GAME OVER", W/2, 110, PAL.red, 22, "center");
+  text(Math.floor(Run.dist/10) + "m geschafft", W/2, 150, PAL.white, 12, "center");
+  ctx.drawImage(SPRITES.ruby, W/2-52, 179, 12, 12);
+  text("+" + Math.floor(Run.rubies) + " Volt", W/2-36, 180, PAL.gold, 12);
+  text("Gesamt: " + Math.floor(Meta.rubies), W/2, 202, PAL.stoneLite, 9, "center");
+  if (Math.floor(Run.dist) >= Meta.bestDist && Meta.runs > 1)
+    text("★ NEUER REKORD! ★", W/2, 224, PAL.gold, 10, "center");
+  button(W/2-70, 260, 140, 34, "NOCHMAL", () => { Run.start(Run.item); setScreen("play"); }, PAL.greenD);
+  button(W/2-70, 304, 140, 30, "UPGRADE-NEXUS", () => setScreen("temple"), PAL.stone, PAL.gold, 8);
+  button(W/2-70, 344, 140, 26, "TITEL", () => setScreen("title"), PAL.stone, PAL.stoneLite, 8);
+}
+
+/* =====================================================================
+   HAUPT-LOOP
+   ===================================================================== */
+function frame(){
+  uiButtons = [];
+  ctx.clearRect(0, 0, W, H);
+  if (screen === "play"){
+    Run.update();
+    if (screen === "play"){                 // (die() kann Screen wechseln)
+      drawBackground(Run.camX);
+      for (const r of RoomDirector.rooms) for (const e of r.ents) if (!e.dead) drawEnt(e, Run.camX);
+      dropShadow(70, Run.y+7, 22);
+      drawHero(70, Run.y, Run.gravFlip, Run.inv > 0);
+      if (Run.hooked){                      // Magnet-Anker: Energie-Kette zur Decke
+        const ax = 96, ay = CEIL+4;         // Anker-Ring vorn oben
+        px(ax-5, CEIL, 10, 4, PAL.metal);
+        px(ax-3, ay, 6, 6, PAL.chain); px(ax-1, ay+2, 2, 2, PAL.dgBg2);
+        const steps = 8;
+        for (let s=0; s<=steps; s++){
+          const cx2 = 74 + (ax-74)*s/steps;
+          const cy2 = Run.y-4 + (ay+4-(Run.y-4))*s/steps + Math.sin(s*1.2+Run.t*0.3)*1.5;
+          px(cx2-1, cy2-1, 3, 3, s%2 ? PAL.gold : PAL.chain);
+        }
+        if (Run.t % 4 === 0) spawnParticles(Run.camX + rnd(74, ax), rnd(CEIL+8, Run.y), 1, PAL.gold);
+      }
+      drawHUD();
+    }
+  }
+  else if (screen === "title")    drawTitle();
+  else if (screen === "temple")   drawTemple();
+  else if (screen === "items")    drawItems();
+  else if (screen === "gameover") drawGameOver();
+  // Partikel & Toasts (über allem)
+  const pOff = (screen==="play" || screen==="gameover") ? Run.camX : 0;
+  for (const p of particles){
+    p.x += p.vx; p.y += p.vy; p.life--;
+    px(p.x - pOff, p.y, 2, 2, p.col);
+  }
+  for (let i=particles.length-1; i>=0; i--) if (particles[i].life<=0) particles.splice(i,1);
+  toasts.forEach((t,i) => { text(t.msg, W/2, 60+i*14, PAL.gold, 10, "center"); t.life--; });
+  for (let i=toasts.length-1; i>=0; i--) if (toasts[i].life<=0) toasts.splice(i,1);
+  // Vignette: sanfte Abdunklung oben/unten (Bühnenlicht)
+  for (let i=0; i<5; i++){
+    const a = (0.10*(1-i/5)).toFixed(3);
+    px(0, i*3, W, 3, "rgba(8,6,16," + a + ")");
+    px(0, H-3-i*3, W, 3, "rgba(8,6,16," + a + ")");
+  }
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>
